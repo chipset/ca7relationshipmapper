@@ -12,14 +12,22 @@
         <div class="sidebar-header">
           <p class="eyebrow">CA-7</p>
           <h1>Relationship Explorer</h1>
-          <p class="sidebar-copy">Select a job to inspect its dependencies and downstream jobs.</p>
+          <p class="sidebar-copy">Upload a CA-7 spool file, then inspect its dependencies and downstream jobs.</p>
         </div>
+
+        <section class="upload-panel">
+          <p class="eyebrow">Source File</p>
+          <button id="upload-button" type="button" class="upload-button">Upload File</button>
+          <input id="file-input" type="file" hidden />
+          <p id="loaded-file-name" class="loaded-file-name">No file loaded</p>
+          <p id="upload-status" class="upload-status">Waiting for a CA-7 text file.</p>
+        </section>
 
         <div class="stats" id="stats"></div>
 
         <label class="search-field">
           <span>Find a job</span>
-          <input id="job-search" type="search" placeholder="Type a job name" autocomplete="off" />
+          <input id="job-search" type="search" placeholder="Type a job name" autocomplete="off" disabled />
         </label>
 
         <div class="job-list" id="job-list" aria-label="Job list"></div>
@@ -34,10 +42,33 @@
           </div>
 
           <div class="toolbar-actions">
-            <button id="expand-all" type="button">Expand All</button>
-            <button id="collapse-all" type="button">Collapse All</button>
+            <button id="diagram-back" type="button" disabled>Back</button>
+            <button id="expand-all" type="button" disabled>Expand All</button>
+            <button id="collapse-all" type="button" disabled>Collapse All</button>
           </div>
         </div>
+
+        <section class="diagram-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Flow Diagram</p>
+              <h3>Drill-Down Neighborhood</h3>
+            </div>
+            <p class="panel-copy">Click any node to re-center the flow around that job.</p>
+          </div>
+
+          <div class="diagram-legend" id="diagram-legend"></div>
+          <div class="diagram-scroll">
+            <svg id="diagram" class="diagram" aria-label="Relationship flow diagram"></svg>
+          </div>
+        </section>
+
+        <section class="panel-header tree-header">
+          <div>
+            <p class="eyebrow">Detailed Tree</p>
+            <h3>Expandable Relationships</h3>
+          </div>
+        </section>
 
         <section id="tree" class="tree" aria-live="polite"></section>
       </main>
