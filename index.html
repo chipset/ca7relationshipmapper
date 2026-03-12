@@ -25,6 +25,17 @@
 
         <div class="stats" id="stats"></div>
 
+        <section class="skipped-panel">
+          <div class="panel-header compact-header">
+            <div>
+              <p class="eyebrow">Skipped Pages</p>
+              <h3>Investigate Parser Gaps</h3>
+            </div>
+            <p id="skipped-count" class="panel-copy">No skipped pages loaded.</p>
+          </div>
+          <div class="skipped-list" id="skipped-list"></div>
+        </section>
+
         <label class="search-field">
           <span>Find a job</span>
           <input id="job-search" type="search" placeholder="Type a job name" autocomplete="off" disabled />
@@ -71,6 +82,17 @@
         </section>
 
         <section id="tree" class="tree" aria-live="polite"></section>
+
+        <section class="skip-detail-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Skipped Page Detail</p>
+              <h3 id="skipped-detail-title">No skipped page selected</h3>
+            </div>
+            <p id="skipped-detail-meta" class="panel-copy">Select a skipped page to inspect its raw content.</p>
+          </div>
+          <pre id="skipped-detail-content" class="skipped-detail-content"></pre>
+        </section>
       </main>
     </div>
 

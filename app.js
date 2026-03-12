@@ -6,6 +6,8 @@ const searchInput = document.getElementById("job-search");
 const selectedJobName = document.getElementById("selected-job-name");
 const selectedJobMeta = document.getElementById("selected-job-meta");
 const statsElement = document.getElementById("stats");
+const skippedListElement = document.getElementById("skipped-list");
+const skippedCountElement = document.getElementById("skipped-count");
 const expandAllButton = document.getElementById("expand-all");
 const collapseAllButton = document.getElementById("collapse-all");
 const diagramElement = document.getElementById("diagram");
@@ -15,9 +17,13 @@ const fileInput = document.getElementById("file-input");
 const uploadButton = document.getElementById("upload-button");
 const uploadStatus = document.getElementById("upload-status");
 const loadedFileName = document.getElementById("loaded-file-name");
+const skippedDetailTitle = document.getElementById("skipped-detail-title");
+const skippedDetailMeta = document.getElementById("skipped-detail-meta");
+const skippedDetailContent = document.getElementById("skipped-detail-content");
 const emptyStateTemplate = document.getElementById("empty-state-template");
 
 const PAGE_START_RE = /1LJOB,JOB=\*,LIST=NODD\s+JOB=\*\s+LIST=NODD\s+DATE=\d{2}\.\d{3}\s+PAGE\s+\d{4}/g;
+const PAGE_META_RE = /DATE=(\d{2}\.\d{3})\s+PAGE\s+(\d{4})/;
 const JOB_NAME_RE = /DATE\/TIME\s+([\$#@A-Z0-9]+)\s+\d{3}\s+/;
 const SECTION_RE = /-{10,}\s*([A-Z0-9 /&]+?)\s*-{10,}/g;
 const ENTRY_RE = /JOB=([\$#@A-Z0-9]+)\s+SCHID=(\d{3})/g;
@@ -36,6 +42,8 @@ const SECTION_LABELS = {
   requirements: "Requirements",
 };
 
+const RELATION_ORDER = ["triggeredBy", "triggeredJobs", "successorJobs", "requirements"];
+
 const DIAGRAM_COLORS = {
   triggeredBy: { fill: "#d7ebf7", stroke: "#2f6f96", text: "#17374f", label: "Triggered By" },
   triggeredJobs: { fill: "#f8d9cf", stroke: "#b4523f", text: "#572016", label: "Triggered Jobs" },
@@ -49,6 +57,7 @@ const state = {
   data: null,
   filteredJobs: [],
   selectedJob: null,
+  selectedSkippedPage: null,
   history: [],
 };
 
@@ -76,12 +85,10 @@ function splitBlocks(text) {
     match = PAGE_START_RE.exec(text);
   }
 
-  const blocks = [];
-  starts.forEach((start, index) => {
+  return starts.map((start, index) => {
     const end = index + 1 < starts.length ? starts[index + 1] : text.length;
-    blocks.push(text.slice(start, end));
+    return text.slice(start, end);
   });
-  return blocks;
 }
 
 function dedupeEntries(entries) {
@@ -105,14 +112,53 @@ function emptyRelationships() {
   };
 }
 
+function getPageMetadata(block) {
+  const match = block.match(PAGE_META_RE);
+  return {
+    date: match?.[1] ?? "unknown",
+    page: match?.[2] ?? "unknown",
+  };
+}
+
+function parseSectionEntries(text) {
+  resetRegex(ENTRY_RE);
+  const entries = [];
+  for (const entryMatch of text.matchAll(ENTRY_RE)) {
+    entries.push({ job: entryMatch[1], schid: entryMatch[2] });
+  }
+  return dedupeEntries(entries);
+}
+
+function inferContinuationSection(relationships) {
+  if (relationships.triggeredJobs.length > 0) {
+    return "triggeredJobs";
+  }
+  if (relationships.successorJobs.length > 0) {
+    return "successorJobs";
+  }
+  if (relationships.requirements.length > 0) {
+    return "requirements";
+  }
+  if (relationships.triggeredBy.length > 0) {
+    return "triggeredBy";
+  }
+  return "triggeredJobs";
+}
+
 function parseBlock(block) {
-  resetRegex(JOB_NAME_RE);
-  const jobMatch = JOB_NAME_RE.exec(block);
+  const jobMatch = block.match(JOB_NAME_RE);
+  const pageMeta = getPageMetadata(block);
   if (!jobMatch) {
-    return null;
+    return {
+      type: "continuation",
+      ...pageMeta,
+      entries: parseSectionEntries(block),
+      raw: block,
+    };
   }
 
   const relationships = emptyRelationships();
+  let lastSectionKey = null;
   resetRegex(SECTION_RE);
   const sections = Array.from(block.matchAll(SECTION_RE));
 
@@ -123,18 +169,12 @@ function parseBlock(block) {
       return;
     }
 
+    lastSectionKey = relationKey;
     const bodyStart = sectionMatch.index + sectionMatch[0].length;
     const nextSection = sections[index + 1];
     const bodyEnd = nextSection ? nextSection.index : block.length;
     const body = block.slice(bodyStart, bodyEnd);
-
-    resetRegex(ENTRY_RE);
-    for (const entryMatch of body.matchAll(ENTRY_RE)) {
-      relationships[relationKey].push({
-        job: entryMatch[1],
-        schid: entryMatch[2],
-      });
-    }
+    relationships[relationKey].push(...parseSectionEntries(body));
   });
 
   Object.keys(relationships).forEach((key) => {
@@ -142,8 +182,11 @@ function parseBlock(block) {
   });
 
   return {
+    type: "job",
+    ...pageMeta,
     jobName: jobMatch[1],
     relationships,
+    lastSectionKey: lastSectionKey ?? inferContinuationSection(relationships),
   };
 }
 
@@ -158,22 +201,45 @@ function incrementCounter(counter, key) {
 function buildGraph(rawText, fileName) {
   const jobs = {};
   const parsedJobNames = new Set();
+  const skippedPages = [];
   let parsedPages = 0;
-  let skippedPages = 0;
+  let continuationPages = 0;
+  let currentJobName = null;
+  let currentSectionKey = null;
 
   splitBlocks(rawText).forEach((block) => {
     const parsed = parseBlock(block);
-    if (!parsed) {
-      skippedPages += 1;
+
+    if (parsed.type === "job") {
+      parsedPages += 1;
+      parsedJobNames.add(parsed.jobName);
+      jobs[parsed.jobName] = {
+        name: parsed.jobName,
+        relationships: parsed.relationships,
+      };
+      currentJobName = parsed.jobName;
+      currentSectionKey = parsed.lastSectionKey;
       return;
     }
 
-    parsedPages += 1;
-    parsedJobNames.add(parsed.jobName);
-    jobs[parsed.jobName] = {
-      name: parsed.jobName,
-      relationships: parsed.relationships,
-    };
+    if (currentJobName && parsed.entries.length > 0) {
+      const targetSection = currentSectionKey ?? inferContinuationSection(jobs[currentJobName].relationships);
+      jobs[currentJobName].relationships[targetSection] = dedupeEntries([
+        ...jobs[currentJobName].relationships[targetSection],
+        ...parsed.entries,
+      ]);
+      continuationPages += 1;
+      return;
+    }
+
+    skippedPages.push({
+      date: parsed.date,
+      page: parsed.page,
+      reason: parsed.entries.length > 0
+        ? "Relationship entries were present, but there was no active job/section to attach them to."
+        : "The page did not contain a parsable job header or relationship entries.",
+      raw: parsed.raw,
+    });
   });
 
   const referencedJobs = new Set();
@@ -181,8 +247,8 @@ function buildGraph(rawText, fileName) {
   const outgoing = createCounter();
 
   Object.entries(jobs).forEach(([jobName, payload]) => {
-    Object.entries(payload.relationships).forEach(([relationKey, entries]) => {
-      entries.forEach((entry) => {
+    RELATION_ORDER.forEach((relationKey) => {
+      payload.relationships[relationKey].forEach((entry) => {
         referencedJobs.add(entry.job);
         if (relationKey === "triggeredBy") {
           incrementCounter(incoming, jobName);
@@ -236,11 +302,13 @@ function buildGraph(rawText, fileName) {
       jobsInSource: parsedPages,
       jobsInGraph: Object.keys(jobs).length,
       jobsReferencedOnly: [...allJobs].filter((jobName) => !parsedJobNames.has(jobName)).length,
-      pagesSkipped: skippedPages,
+      pagesSkipped: skippedPages.length,
+      continuationPages,
       relationshipCounts,
     },
     jobNames: Object.keys(jobs).sort(),
     jobs,
+    skippedPages,
   };
 }
 
@@ -266,16 +334,78 @@ function setControlsEnabled(enabled) {
   diagramBackButton.disabled = !enabled || state.history.length === 0;
 }
 
+function renderSkippedDetail(pageId) {
+  const skippedPage = state.data?.skippedPages.find((page) => `${page.date}-${page.page}` === pageId);
+  if (!skippedPage) {
+    skippedDetailTitle.textContent = "No skipped page selected";
+    skippedDetailMeta.textContent = "Select a skipped page to inspect its raw content.";
+    skippedDetailContent.textContent = "";
+    return;
+  }
+
+  skippedDetailTitle.textContent = `Page ${skippedPage.page}`;
+  skippedDetailMeta.textContent = `${skippedPage.date} | ${skippedPage.reason}`;
+  skippedDetailContent.textContent = skippedPage.raw;
+}
+
+function selectSkippedPage(pageId) {
+  state.selectedSkippedPage = pageId;
+  renderSkippedList();
+  renderSkippedDetail(pageId);
+}
+
+function renderSkippedList() {
+  skippedListElement.innerHTML = "";
+  if (!state.data) {
+    skippedCountElement.textContent = "No skipped pages loaded.";
+    return;
+  }
+
+  const skippedPages = state.data.skippedPages ?? [];
+  skippedCountElement.textContent = skippedPages.length === 0
+    ? "No skipped pages."
+    : `${formatNumber(skippedPages.length)} skipped page${skippedPages.length === 1 ? "" : "s"}.`;
+
+  if (skippedPages.length === 0) {
+    const note = document.createElement("p");
+    note.className = "panel-copy";
+    note.textContent = "All relationship continuation pages were attached successfully.";
+    skippedListElement.append(note);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  skippedPages.forEach((page) => {
+    const pageId = `${page.date}-${page.page}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `skipped-list-item${state.selectedSkippedPage === pageId ? " is-selected" : ""}`;
+    button.addEventListener("click", () => selectSkippedPage(pageId));
+    button.append(
+      createNodeTag(`Page ${page.page}`, "job-list-name"),
+      createNodeTag(page.reason, "job-list-meta")
+    );
+    fragment.append(button);
+  });
+  skippedListElement.append(fragment);
+}
+
 function resetView() {
   state.filteredJobs = [];
   state.selectedJob = null;
+  state.selectedSkippedPage = null;
   state.history = [];
   selectedJobName.textContent = "Upload a file";
   selectedJobMeta.textContent = "Choose a CA-7 spool file to parse and display.";
   statsElement.innerHTML = "";
+  skippedListElement.innerHTML = "";
+  skippedCountElement.textContent = "No skipped pages loaded.";
   jobListElement.innerHTML = "";
   treeElement.innerHTML = "";
   diagramElement.innerHTML = "";
+  skippedDetailTitle.textContent = "No skipped page selected";
+  skippedDetailMeta.textContent = "Select a skipped page to inspect its raw content.";
+  skippedDetailContent.textContent = "";
   loadedFileName.textContent = "No file loaded";
   setControlsEnabled(false);
 }
@@ -330,16 +460,11 @@ function renderDiagramLegend() {
   ["triggeredBy", "triggeredJobs", "successorJobs", "requirements"].forEach((key) => {
     const item = document.createElement("div");
     item.className = "legend-item";
-
     const swatch = document.createElement("span");
     swatch.className = "legend-swatch";
     swatch.style.background = DIAGRAM_COLORS[key].fill;
     swatch.style.borderColor = DIAGRAM_COLORS[key].stroke;
-
-    const label = document.createElement("span");
-    label.textContent = DIAGRAM_COLORS[key].label;
-
-    item.append(swatch, label);
+    item.append(swatch, createNodeTag(DIAGRAM_COLORS[key].label));
     diagramLegendElement.append(item);
   });
 }
@@ -361,10 +486,10 @@ function renderJobList() {
     button.type = "button";
     button.className = `job-list-item${jobName === state.selectedJob ? " is-selected" : ""}`;
     button.addEventListener("click", () => setSelectedJob(jobName));
-
-    const name = createNodeTag(jobName, "job-list-name");
-    const meta = createNodeTag(`${job.stats.total} rel`, "job-list-meta");
-    button.append(name, meta);
+    button.append(
+      createNodeTag(jobName, "job-list-name"),
+      createNodeTag(`${job.stats.total} rel`, "job-list-meta")
+    );
     fragment.append(button);
   });
   jobListElement.append(fragment);
@@ -414,7 +539,7 @@ function createDiagramNode(node) {
   const palette = DIAGRAM_COLORS[node.relationKey] ?? DIAGRAM_COLORS.selected;
   const group = createSvgElement("g", { class: "diagram-node-group" });
 
-  const rect = createSvgElement("rect", {
+  group.append(createSvgElement("rect", {
     x: node.x,
     y: node.y,
     rx: 18,
@@ -425,8 +550,7 @@ function createDiagramNode(node) {
     stroke: palette.stroke,
     "stroke-width": 2,
     class: node.type === "overflow" ? "diagram-node overflow" : "diagram-node",
-  });
-  group.append(rect);
+  }));
 
   const title = createSvgElement("text", {
     x: node.x + 16,
@@ -437,23 +561,20 @@ function createDiagramNode(node) {
   title.textContent = node.type === "overflow" ? node.label : node.job;
   group.append(title);
 
-  if (node.type === "job" && node.schid) {
+  const metaText = node.type === "job" && node.schid
+    ? `SCHID ${node.schid}`
+    : node.relationKey === "selected"
+      ? `${state.data.jobs[node.job].stats.outgoing} out / ${state.data.jobs[node.job].stats.incoming} in`
+      : null;
+
+  if (metaText) {
     const meta = createSvgElement("text", {
       x: node.x + 16,
       y: node.y + 42,
       fill: palette.text,
       class: "diagram-node-meta",
     });
-    meta.textContent = `SCHID ${node.schid}`;
-    group.append(meta);
-  } else if (node.relationKey === "selected") {
-    const meta = createSvgElement("text", {
-      x: node.x + 16,
-      y: node.y + 44,
-      fill: palette.text,
-      class: "diagram-node-meta",
-    });
-    meta.textContent = `${state.data.jobs[node.job].stats.outgoing} out / ${state.data.jobs[node.job].stats.incoming} in`;
+    meta.textContent = metaText;
     group.append(meta);
   }
 
@@ -473,11 +594,11 @@ function renderDiagram() {
 
   const selectedJob = state.data.jobs[state.selectedJob];
   const columns = [
-    { key: "triggeredBy", title: "Upstream", x: 48 },
-    { key: "selected", title: "Selected", x: 410 },
-    { key: "triggeredJobs", title: "Triggered", x: 772 },
-    { key: "successorJobs", title: "Successors", x: 1074 },
-    { key: "requirements", title: "Requirements", x: 1376 },
+    { title: "Upstream", x: 48 },
+    { title: "Selected", x: 410 },
+    { title: "Triggered", x: 772 },
+    { title: "Successors", x: 1074 },
+    { title: "Requirements", x: 1376 },
   ];
 
   const laneCounts = [
@@ -487,27 +608,19 @@ function renderDiagram() {
     relationshipEntriesFor(state.selectedJob, "successorJobs").length,
     relationshipEntriesFor(state.selectedJob, "requirements").length,
   ];
-  const maxLaneCount = Math.max(...laneCounts, 1);
-  const nodeHeight = 56;
-  const rootY = Math.max(140, Math.floor((maxLaneCount * 82) / 2));
+  const rootY = Math.max(140, Math.floor((Math.max(...laneCounts, 1) * 82) / 2));
   const viewHeight = Math.max(420, rootY * 2 + 160);
-  const viewWidth = 1640;
 
-  diagramElement.setAttribute("viewBox", `0 0 ${viewWidth} ${viewHeight}`);
+  diagramElement.setAttribute("viewBox", `0 0 1640 ${viewHeight}`);
   diagramElement.setAttribute("role", "img");
 
   columns.forEach((column) => {
-    const title = createSvgElement("text", {
-      x: column.x,
-      y: 54,
-      class: "diagram-title",
-    });
+    const title = createSvgElement("text", { x: column.x, y: 54, class: "diagram-title" });
     title.textContent = column.title;
     diagramElement.append(title);
   });
 
   const topFor = (count) => Math.max(96, rootY - ((Math.max(count, 1) - 1) * 82) / 2);
-
   const nodeColumns = {
     triggeredBy: buildColumnNodes(relationshipEntriesFor(state.selectedJob, "triggeredBy"), "triggeredBy", columns[0].x, topFor(laneCounts[0])),
     triggeredJobs: buildColumnNodes(relationshipEntriesFor(state.selectedJob, "triggeredJobs"), "triggeredJobs", columns[2].x, topFor(laneCounts[2])),
@@ -518,7 +631,6 @@ function renderDiagram() {
   const rootNode = {
     type: "job",
     job: selectedJob.name,
-    schid: null,
     relationKey: "selected",
     x: columns[1].x,
     y: rootY,
@@ -531,18 +643,15 @@ function renderDiagram() {
       const reverse = relationKey === "triggeredBy";
       const startX = reverse ? node.x + 190 : rootNode.x + rootNode.width;
       const endX = reverse ? rootNode.x : node.x;
-      const path = createSvgElement("path", {
-        d: curvedPath(startX, node.y + nodeHeight / 2, endX, rootY + rootNode.height / 2),
+      diagramElement.append(createSvgElement("path", {
+        d: curvedPath(startX, node.y + 28, endX, rootY + 32),
         class: "diagram-link",
         stroke: DIAGRAM_COLORS[relationKey].stroke,
-      });
-      diagramElement.append(path);
+      }));
     });
   });
 
-  Object.values(nodeColumns).flat().forEach((node) => {
-    diagramElement.append(createDiagramNode(node));
-  });
+  Object.values(nodeColumns).flat().forEach((node) => diagramElement.append(createDiagramNode(node)));
   diagramElement.append(createDiagramNode(rootNode));
 }
 
@@ -564,13 +673,11 @@ function createJobNode(jobName, path, depth) {
     setSelectedJob(jobName);
   });
 
-  const meta = createNodeTag(`${job.stats.outgoing} out / ${job.stats.incoming} in`, "job-node-meta");
-  summary.append(label, meta);
+  summary.append(label, createNodeTag(`${job.stats.outgoing} out / ${job.stats.incoming} in`, "job-node-meta"));
   wrapper.append(summary);
 
   const content = document.createElement("div");
   content.className = "job-content";
-
   const nextPath = new Set(path);
   nextPath.add(jobName);
 
@@ -591,7 +698,6 @@ function createJobNode(jobName, path, depth) {
 
     const list = document.createElement("div");
     list.className = "relation-list";
-
     entries.forEach((entry) => {
       if (nextPath.has(entry.job)) {
         const cycle = document.createElement("div");
@@ -601,14 +707,13 @@ function createJobNode(jobName, path, depth) {
         return;
       }
 
-      const childNode = createJobNode(entry.job, nextPath, depth + 1);
       const schid = document.createElement("div");
       schid.className = "schid-pill";
       schid.textContent = `SCHID ${entry.schid}`;
 
       const container = document.createElement("div");
       container.className = "child-node";
-      container.append(schid, childNode);
+      container.append(schid, createJobNode(entry.job, nextPath, depth + 1));
       list.append(container);
     });
 
@@ -680,24 +785,29 @@ async function loadUploadedFile(file) {
   try {
     const rawText = await file.text();
     const data = buildGraph(rawText, file.name);
-
     state.data = data;
     state.history = [];
+    state.selectedSkippedPage = data.skippedPages[0]
+      ? `${data.skippedPages[0].date}-${data.skippedPages[0].page}`
+      : null;
     state.filteredJobs = [...data.jobNames];
     loadedFileName.textContent = file.name;
     renderStats();
     renderDiagramLegend();
+    renderSkippedList();
     setControlsEnabled(true);
 
     if (data.jobNames.length === 0) {
       selectedJobName.textContent = "No jobs found";
       selectedJobMeta.textContent = "The uploaded file did not contain any CA-7 job pages.";
       uploadStatus.textContent = "Parsed, but no jobs were detected.";
+      renderSkippedDetail(state.selectedSkippedPage);
       return;
     }
 
     setSelectedJob(data.jobNames[0], { recordHistory: false });
-    uploadStatus.textContent = `Loaded ${formatNumber(data.stats.jobsInGraph)} jobs from ${file.name}.`;
+    renderSkippedDetail(state.selectedSkippedPage);
+    uploadStatus.textContent = `Loaded ${formatNumber(data.stats.jobsInGraph)} jobs from ${file.name}. Attached ${formatNumber(data.stats.continuationPages)} continuation page${data.stats.continuationPages === 1 ? "" : "s"}.`;
   } catch (error) {
     state.data = null;
     resetView();
