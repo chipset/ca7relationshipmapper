@@ -1,0 +1,83 @@
+{
+  "name": "ca7-relationship-explorer",
+  "displayName": "CA-7 Relationship Explorer",
+  "description": "Inspect CA-7 spool relationships inside VS Code.",
+  "version": "0.0.1",
+  "publisher": "TMcQ",
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chipset/ca7relationshipmapper"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "files": [
+    "extension.js",
+    "media/**",
+    "LICENSE",
+    "README.md",
+    "package.json"
+  ],
+  "activationEvents": [
+    "onCommand:ca7RelationshipExplorer.openExplorer",
+    "onCustomEditor:ca7RelationshipExplorer.viewer"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ca7",
+        "aliases": [
+          "CA7"
+        ],
+        "extensions": [
+          ".ca7"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "ca7RelationshipExplorer.openExplorer",
+        "title": "CA-7 Relationship Explorer: Open"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "ca7RelationshipExplorer.viewer",
+        "displayName": "CA-7 Relationship Explorer",
+        "selector": [
+          {
+            "filenamePattern": "*.ca7"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "ca7RelationshipExplorer.openExplorer",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "ca7RelationshipExplorer.openExplorer",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ca7RelationshipExplorer.openExplorer"
+        }
+      ]
+    }
+  }
+}

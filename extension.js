@@ -1,0 +1,220 @@
+const path = require("path");
+const vscode = require("vscode");
+
+function activate(context) {
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ca7RelationshipExplorer.openExplorer", async (resource) => {
+      const target = await resolveTargetUri(resource);
+      if (!target) {
+        vscode.window.showInformationMessage("No file selected.");
+        return;
+      }
+
+      await vscode.commands.executeCommand(
+        "vscode.openWith",
+        target,
+        "ca7RelationshipExplorer.viewer",
+        vscode.ViewColumn.Active
+      );
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.window.registerCustomEditorProvider(
+      "ca7RelationshipExplorer.viewer",
+      new Ca7CustomEditorProvider(context),
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+        supportsMultipleEditorsPerDocument: false,
+      }
+    )
+  );
+}
+
+async function resolveTargetUri(resource) {
+  if (resource instanceof vscode.Uri && resource.scheme === "file") {
+    return resource;
+  }
+
+  const activeUri = vscode.window.activeTextEditor?.document?.uri;
+  if (activeUri?.scheme === "file") {
+    return activeUri;
+  }
+
+  const picked = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    canSelectFiles: true,
+    canSelectFolders: false,
+    filters: {
+      "CA-7 Files": ["ca7"],
+      "All Files": ["*"],
+    },
+    openLabel: "Open CA-7 File",
+  });
+
+  return picked?.[0];
+}
+
+class Ca7CustomEditorProvider {
+  constructor(context) {
+    this.context = context;
+  }
+
+  async resolveCustomTextEditor(document, webviewPanel) {
+    webviewPanel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, "media")],
+    };
+    webviewPanel.webview.html = getWebviewHtml(webviewPanel.webview, this.context.extensionUri);
+    webviewPanel.title = `CA-7: ${path.basename(document.uri.fsPath)}`;
+
+    const syncDocumentToWebview = () => {
+      webviewPanel.webview.postMessage({
+        type: "loadFile",
+        payload: {
+          fileName: path.basename(document.uri.fsPath),
+          rawText: document.getText(),
+        },
+      });
+    };
+
+    const textChangeSubscription = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document.uri.toString() === document.uri.toString()) {
+        syncDocumentToWebview();
+      }
+    });
+
+    webviewPanel.webview.onDidReceiveMessage(async (message) => {
+      if (message.type === "ready") {
+        syncDocumentToWebview();
+      }
+    });
+
+    webviewPanel.onDidDispose(() => {
+      textChangeSubscription.dispose();
+    });
+  }
+}
+
+function getWebviewHtml(webview, extensionUri) {
+  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "app.js"));
+  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "styles.css"));
+  const nonce = String(Date.now());
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
+    <title>CA-7 Relationship Explorer</title>
+    <link rel="stylesheet" href="${styleUri}" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <p class="eyebrow">CA-7</p>
+          <h1>Relationship Explorer</h1>
+          <p class="sidebar-copy">Open a CA-7 spool file from VS Code, then inspect its dependencies and downstream jobs.</p>
+        </div>
+
+        <section class="upload-panel">
+          <p class="eyebrow">Source File</p>
+          <p id="loaded-file-name" class="loaded-file-name">No file loaded</p>
+          <p id="upload-status" class="upload-status">Waiting for a CA-7 text file.</p>
+        </section>
+
+        <div class="stats" id="stats"></div>
+
+        <section class="skipped-panel">
+          <div class="panel-header compact-header">
+            <div>
+              <p class="eyebrow">Skipped Pages</p>
+              <h3>Investigate Parser Gaps</h3>
+            </div>
+            <p id="skipped-count" class="panel-copy">No skipped pages loaded.</p>
+          </div>
+          <div class="skipped-list" id="skipped-list"></div>
+        </section>
+
+        <label class="search-field">
+          <span>Find a job</span>
+          <input id="job-search" type="search" placeholder="Type a job name" autocomplete="off" disabled />
+        </label>
+
+        <div class="job-list" id="job-list" aria-label="Job list"></div>
+      </aside>
+
+      <main class="main-panel">
+        <div class="toolbar">
+          <div>
+            <p class="eyebrow">Selected Job</p>
+            <h2 id="selected-job-name">Loading...</h2>
+            <p id="selected-job-meta" class="selected-meta"></p>
+          </div>
+
+          <div class="toolbar-actions">
+            <button id="diagram-back" type="button" disabled>Back</button>
+            <button id="expand-all" type="button" disabled>Expand All</button>
+            <button id="collapse-all" type="button" disabled>Collapse All</button>
+          </div>
+        </div>
+
+        <section class="diagram-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Flow Diagram</p>
+              <h3>Drill-Down Neighborhood</h3>
+            </div>
+            <p class="panel-copy">Click any node to re-center the flow around that job.</p>
+          </div>
+
+          <div class="diagram-legend" id="diagram-legend"></div>
+          <div class="diagram-scroll">
+            <svg id="diagram" class="diagram" aria-label="Relationship flow diagram"></svg>
+          </div>
+        </section>
+
+        <section class="panel-header tree-header">
+          <div>
+            <p class="eyebrow">Detailed Tree</p>
+            <h3>Expandable Relationships</h3>
+          </div>
+        </section>
+
+        <section id="tree" class="tree" aria-live="polite"></section>
+
+        <section class="skip-detail-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Skipped Page Detail</p>
+              <h3 id="skipped-detail-title">No skipped page selected</h3>
+            </div>
+            <p id="skipped-detail-meta" class="panel-copy">Select a skipped page to inspect its raw content.</p>
+          </div>
+          <pre id="skipped-detail-content" class="skipped-detail-content"></pre>
+        </section>
+      </main>
+    </div>
+
+    <template id="empty-state-template">
+      <div class="empty-state">
+        <h3>No matching jobs</h3>
+        <p>Adjust the search to find another CA-7 job.</p>
+      </div>
+    </template>
+
+    <script nonce="${nonce}" src="${scriptUri}"></script>
+  </body>
+</html>`;
+}
+
+function deactivate() {}
+
+module.exports = {
+  activate,
+  deactivate,
+};
